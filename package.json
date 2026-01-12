@@ -1,0 +1,20 @@
+{
+  "name": "chat-export",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "export": "node chat-export.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "dependencies": {
+    "axios": "^1.13.2",
+    "jsdom": "^27.1.0",
+    "puppeteer": "^24.29.0",
+    "turndown": "^7.2.2"
+  }
+}

@@ -68,6 +68,20 @@ function sanitizeFilename(name) {
     console.log("⏳ Aguardando carregamento completo...");
     await page.waitForSelector("body", { timeout: 30000 });
 
+    // Scroll para carregar todo o conteúdo (lazy loading)
+    console.log("📜 Fazendo scroll para carregar conteúdo...");
+    let scrolls = 0;
+    let previousHeight = 0;
+    while (true) {
+      const currentHeight = await page.evaluate(() => document.body.scrollHeight);
+      if (currentHeight === previousHeight || scrolls > 20) break;
+      previousHeight = currentHeight;
+      await page.evaluate(() => window.scrollBy(0, window.innerHeight));
+      await page.waitForTimeout(500); // Aguarda carregamento
+      scrolls++;
+    }
+    console.log(`✓ Scroll completo (${scrolls} iterações)`);
+
     // Extrai dados da página
     const pageData = await page.evaluate(() => {
       // Tenta extrair título do elemento title da página
@@ -131,15 +145,15 @@ function sanitizeFilename(name) {
 
         for (const el of messageElements) {
           const text = el.innerText?.trim();
-          if (!text || seenContent.has(text) || text.length < 10) continue;
+          if (!text || seenContent.has(text)) continue;
 
-          // Skip elementos que parecem ser UI (cabeçalhos, botões, etc)
+          // Skip apenas elementos que são claramente UI, não conteúdo
           if (
             text === "This is a copy of a conversation between ChatGPT & Anonymous." ||
             text === "Report conversation" ||
-            text.includes("Attach") ||
-            text.includes("Search") ||
-            text.includes("Create image")
+            text.includes("ChatGPT can make mistakes. Check important info.") ||
+            text.includes("Cookie Preferences") ||
+            text.match(/^(Attach|Search|Create image|Voice|Study|Download|Read aloud)$/i)
           ) {
             continue;
           }
@@ -216,45 +230,34 @@ function sanitizeFilename(name) {
     markdown += `**Exported:** ${new Date().toLocaleString("pt-BR")}  \n`;
     markdown += `**Link:** [${pageData.url}](${pageData.url})  \n\n`;
 
-    // Turnos
-    let promptCount = 0;
-    let currentSection = null;
+    // Turnos - organiza como prompt/response alternados
+    let promptNumber = 0;
+    let lastWasPrompt = false;
 
     for (const turn of pageData.turns) {
       const content = turn.content.trim();
       if (!content) continue;
 
-      // Heurística para detectar padrão "You said:" / "ChatGPT said:"
-      if (content.includes("You said:")) {
-        promptCount++;
-        currentSection = "prompt";
-        const cleanContent = content.replace("You said:", "").trim();
-        markdown += `## Prompt ${promptCount}:\n${cleanContent}\n\n`;
-      } else if (
-        content.includes("ChatGPT said:") ||
-        content.includes("Assistant:") ||
-        turn.role === "assistant"
-      ) {
-        const cleanContent = content
-          .replace("ChatGPT said:", "")
-          .replace("Assistant:", "")
-          .trim();
-        markdown += `## Response ${promptCount}:\n${cleanContent}\n\n`;
-      } else if (turn.role === "user") {
-        promptCount++;
-        markdown += `## Prompt ${promptCount}:\n${content}\n\n`;
+      // Classifica como prompt ou response
+      let isPrompt = false;
+
+      if (turn.role === "user") {
+        isPrompt = true;
       } else if (turn.role === "assistant") {
-        markdown += `## Response ${promptCount}:\n${content}\n\n`;
+        isPrompt = false;
       } else {
-        // Fallback: alterna entre prompt e response
-        if (!currentSection || currentSection === "response") {
-          promptCount++;
-          currentSection = "prompt";
-          markdown += `## Prompt ${promptCount}:\n${content}\n\n`;
-        } else {
-          currentSection = "response";
-          markdown += `## Response ${promptCount}:\n${content}\n\n`;
-        }
+        // Para elementos não classificados, usa heurística de alternância
+        // Inverte: se o último foi prompt, este é response
+        isPrompt = !lastWasPrompt;
+      }
+
+      if (isPrompt) {
+        promptNumber++;
+        markdown += `## Prompt ${promptNumber}:\n${content}\n\n`;
+        lastWasPrompt = true;
+      } else {
+        markdown += `## Response ${promptNumber}:\n${content}\n\n`;
+        lastWasPrompt = false;
       }
     }
 

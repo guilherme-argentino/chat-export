@@ -7,45 +7,22 @@
  *
  * 📖 Uso:
  *   yarn run export https://chatgpt.com/share/<ID>
- *   yarn run export https://chatgpt.com/c/<ID>
- *
- * 🔧 Requisitos:
- *   - Node.js 18+
- *   - Dependências: puppeteer, jsdom, turndown
  */
 
 import fs from "fs";
 import path from "path";
 import puppeteer from "puppeteer";
 
-// ===============================================================
-// 🔹 Validação de entrada
-// ===============================================================
 const chatUrl = process.argv[2];
 if (!chatUrl) {
   console.error("❌ Uso: yarn run export <URL da conversa>");
-  console.error("   Exemplo: yarn run export https://chatgpt.com/share/6964fb43-8e94-8010-8134-2214cdc4035f");
   process.exit(1);
 }
 
-// ===============================================================
-// 🔹 Funções auxiliares
-// ===============================================================
-
-/**
- * Sanitiza nome de arquivo
- */
 function sanitizeFilename(name) {
-  return name
-    .replace(/[^a-zA-Z0-9\s-]/g, "")
-    .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, 100);
+  return name.replace(/[^a-zA-Z0-9\s-]/g, "").replace(/\s+/g, " ").trim().slice(0, 100);
 }
 
-// ===============================================================
-// 🔹 Função principal de extração
-// ===============================================================
 (async () => {
   console.log(`🌐 Acessando: ${chatUrl}`);
 
@@ -57,180 +34,103 @@ function sanitizeFilename(name) {
   const page = await browser.newPage();
 
   try {
-    // Define timeout e viewport
-    page.setDefaultTimeout(60000);
-    page.setDefaultNavigationTimeout(60000);
-    await page.setViewport({ width: 1280, height: 720 });
+    page.setDefaultTimeout(90000);
+    page.setDefaultNavigationTimeout(90000);
 
-    // Acessa a URL
     await page.goto(chatUrl, { waitUntil: "networkidle2" });
+    console.log("⏳ Aguardando carregamento...");
+    await page.waitForSelector("main", { timeout: 30000 });
 
-    console.log("⏳ Aguardando carregamento completo...");
-    await page.waitForSelector("body", { timeout: 30000 });
+    // Scroll agressivo até fim
+    console.log("📜 Scrollando para carregar todo conteúdo...");
+    await page.evaluate(() => {
+      return new Promise((resolve) => {
+        let totalHeight = 0;
+        const distance = window.innerHeight;
+        const timer = setInterval(() => {
+          const scrollHeight = document.body.scrollHeight;
+          window.scrollBy(0, distance);
+          totalHeight += distance;
+          if (totalHeight >= scrollHeight - window.innerHeight) {
+            clearInterval(timer);
+            resolve();
+          }
+        }, 400);
+      });
+    });
 
-    // Scroll para carregar todo o conteúdo (lazy loading)
-    console.log("📜 Fazendo scroll para carregar conteúdo...");
-    let scrolls = 0;
-    let previousHeight = 0;
-    while (true) {
-      const currentHeight = await page.evaluate(() => document.body.scrollHeight);
-      if (currentHeight === previousHeight || scrolls > 20) break;
-      previousHeight = currentHeight;
-      await page.evaluate(() => window.scrollBy(0, window.innerHeight));
-      await page.waitForTimeout(500); // Aguarda carregamento
-      scrolls++;
-    }
-    console.log(`✓ Scroll completo (${scrolls} iterações)`);
+    // Aguarda final do carregamento
+    await new Promise(r => setTimeout(r, 2000));
 
-    // Extrai dados da página
+    console.log("✓ Scroll completo");
+
+    // Extrai dados de forma agressiva
     const pageData = await page.evaluate(() => {
-      // Tenta extrair título do elemento title da página
       let title = document.querySelector("title")?.textContent || "Conversa";
+      title = title.replace(/\s*[|-]\s*ChatGPT$/gi, "").replace(/ChatGPT\s*/gi, "").trim() || "Conversa";
 
-      // Remove sufixos comuns
-      title = title
-        .replace(/\s*[|-]\s*ChatGPT$/gi, "")
-        .replace(/\s*[|-]\s*OpenAI$/gi, "")
-        .replace(/ChatGPT\s*/gi, "")
-        .trim() || "Conversa";
-
-      // Se ficar vazio ou muito genérico, usa um padrão
-      if (!title || title === "Conversa") {
-        // Tenta extrair do primeiro prompt ou padrão
-        title = "Conversa" + new Date().getTime().toString().slice(-6);
-      }
-
-      // Tenta extrair data da página (pode estar em atributos ou texto)
-      const pageText = document.body.innerText;
-      let createdDate = null;
-      let updatedDate = null;
-
-      // Procura por padrões de data (formato comum: "1/11/2026 17:43:43")
-      const dateMatch = pageText.match(/\d{1,2}\/\d{1,2}\/\d{4}\s+\d{1,2}:\d{2}:\d{2}/);
-      if (dateMatch) {
-        createdDate = dateMatch[0];
-        updatedDate = dateMatch[0];
-      }
-
-      // Se não encontrou, usa valores padrão
-      const now = new Date();
-      if (!createdDate) {
-        createdDate = now.toLocaleString("pt-BR");
-        updatedDate = createdDate;
-      }
-
-      // Extrai turnos da conversa - estratégia melhorada
-      const turns = [];
-      const seenContent = new Set(); // Para evitar duplicatas
-
-      // Procura pelos elementos de mensagem do ChatGPT
-      // O ChatGPT estrutura as mensagens em divs dentro de main
+      const now = new Date().toLocaleString("pt-BR");
       const main = document.querySelector("main");
-      if (main) {
-        // Procura por elementos que contêm as mensagens
-        // Geralmente têm grupos de 2 (user e assistant) dentro de um container
-        const messageGroups = main.querySelectorAll("[data-testid*='message'], .message-group, .space-y");
+      if (!main) return { title, createdDate: now, updatedDate: now, url: window.location.href, turns: [] };
 
-        // Se não encontrou com data-testid, tenta uma abordagem diferente
-        let messageElements = Array.from(messageGroups);
-        if (messageElements.length === 0) {
-          // Procura por elementos com conteúdo significativo dentro de main
-          messageElements = Array.from(main.querySelectorAll("div")).filter((el) => {
-            const text = el.innerText?.trim();
-            const children = el.children.length;
-            // Elemento com texto, mas não é um container gigante
-            return text && text.length > 20 && text.length < 5000 && children < 15;
-          });
-        }
+      const turns = [];
+      const seen = new Set();
 
-        for (const el of messageElements) {
-          const text = el.innerText?.trim();
-          if (!text || seenContent.has(text)) continue;
+      // Extrai TODOS os elementos com texto significativo
+      const allDivs = main.querySelectorAll("div");
 
-          // Skip apenas elementos que são claramente UI, não conteúdo
-          if (
-            text === "This is a copy of a conversation between ChatGPT & Anonymous." ||
-            text === "Report conversation" ||
-            text.includes("ChatGPT can make mistakes. Check important info.") ||
-            text.includes("Cookie Preferences") ||
-            text.match(/^(Attach|Search|Create image|Voice|Study|Download|Read aloud)$/i)
-          ) {
-            continue;
+      for (const div of allDivs) {
+        let text = div.innerText?.trim();
+        if (!text || text.length < 15 || seen.has(text)) continue;
+
+        // Ignora containers com muitos filhos
+        if (div.children.length > 40) continue;
+
+        // Ignora UI
+        if (text.match(/^(Attach|Search|Create|Voice|Download|Read|Report|This is|ChatGPT can|Cookie)/i)) continue;
+
+        seen.add(text);
+        turns.push({ 
+          role: text.length > 400 ? "assistant" : "unknown", 
+          content: text 
+        });
+      }
+
+      // Se não pegou nada, tenta articles e paragrafos
+      if (turns.length === 0) {
+        const others = main.querySelectorAll("article, p, [role='article']");
+        for (const el of others) {
+          let text = el.innerText?.trim();
+          if (text && text.length > 20 && !seen.has(text)) {
+            seen.add(text);
+            turns.push({ role: "unknown", content: text });
           }
-
-          // Heurística para detectar user vs assistant
-          let role = "unknown";
-          const html = el.innerHTML || "";
-
-          // Procura por classes ou atributos específicos
-          if (
-            html.includes('data-testid="user-message"') ||
-            html.includes('data-testid=\'user-message\'') ||
-            html.includes("from-gray") ||
-            el.className.includes("user") ||
-            el.className.match(/\byou\b/i)
-          ) {
-            role = "user";
-          } else if (
-            html.includes('data-testid="assistant-message"') ||
-            html.includes('data-testid=\'assistant-message\'') ||
-            html.includes("from-[#0D8ABC]") ||
-            html.includes("bg-blue") ||
-            el.className.includes("assistant") ||
-            el.className.match(/\b(gpt|assistant|bot)\b/i)
-          ) {
-            role = "assistant";
-          } else {
-            // Fallback: heurística baseada em padrões de texto
-            // Se tem colon no começo ou é muito longo sem estrutura, é provavelmente assistente
-            if (text.startsWith("You:") || text.startsWith("You said:")) {
-              role = "user";
-            } else if (text.startsWith("ChatGPT:") || text.startsWith("ChatGPT said:") || text.length > 500) {
-              role = "assistant";
-            } else {
-              // Alterna baseado no último role adicionado
-              const lastTurn = turns[turns.length - 1];
-              role = lastTurn?.role === "user" ? "assistant" : "user";
-            }
-          }
-
-          // Adiciona se ainda não foi visto
-          seenContent.add(text);
-          turns.push({
-            role,
-            content: text,
-          });
         }
       }
 
       return {
         title,
-        createdDate,
-        updatedDate,
+        createdDate: now,
+        updatedDate: now,
         url: window.location.href,
         turns,
       };
     });
 
     console.log(`📄 Título: "${pageData.title}"`);
-    console.log(`💬 Encontrados ${pageData.turns.length} turnos`);
+    console.log(`💬 Encontrados ${pageData.turns.length} blocos`);
 
     if (pageData.turns.length === 0) {
-      throw new Error("Não foi possível extrair nenhuma mensagem da conversa.");
+      throw new Error("Não foi possível extrair conteúdo da conversa");
     }
 
-    // ===============================================================
-    // 🔹 Processamento e formatação
-    // ===============================================================
+    // Formata Markdown
     let markdown = `# ${pageData.title}\n\n`;
-
-    // Metadados
     markdown += `**Created:** ${pageData.createdDate}  \n`;
     markdown += `**Updated:** ${pageData.updatedDate}  \n`;
     markdown += `**Exported:** ${new Date().toLocaleString("pt-BR")}  \n`;
     markdown += `**Link:** [${pageData.url}](${pageData.url})  \n\n`;
 
-    // Turnos - organiza como prompt/response alternados
     let promptNumber = 0;
     let lastWasPrompt = false;
 
@@ -238,18 +138,7 @@ function sanitizeFilename(name) {
       const content = turn.content.trim();
       if (!content) continue;
 
-      // Classifica como prompt ou response
-      let isPrompt = false;
-
-      if (turn.role === "user") {
-        isPrompt = true;
-      } else if (turn.role === "assistant") {
-        isPrompt = false;
-      } else {
-        // Para elementos não classificados, usa heurística de alternância
-        // Inverte: se o último foi prompt, este é response
-        isPrompt = !lastWasPrompt;
-      }
+      let isPrompt = turn.role === "user" ? true : turn.role === "assistant" ? false : !lastWasPrompt;
 
       if (isPrompt) {
         promptNumber++;
@@ -261,12 +150,9 @@ function sanitizeFilename(name) {
       }
     }
 
-    // ===============================================================
-    // 🔹 Salva arquivo
-    // ===============================================================
+    // Salva
     const outputDir = path.resolve("./docs/chats");
     fs.mkdirSync(outputDir, { recursive: true });
-
     const filename = sanitizeFilename(pageData.title);
     const filePath = path.join(outputDir, `${filename}.md`);
 
@@ -274,10 +160,10 @@ function sanitizeFilename(name) {
 
     console.log(`\n✅ Conversa exportada com sucesso!`);
     console.log(`📁 Arquivo: ${filePath}`);
-    console.log(`📊 Tamanho: ${markdown.length} caracteres, ${pageData.turns.length} turnos`);
+    console.log(`📊 ${(markdown.length / 1024).toFixed(1)}KB, ${pageData.turns.length} blocos`);
 
   } catch (err) {
-    console.error(`\n❌ Erro ao exportar conversa:`);
+    console.error(`\n❌ Erro:`);
     console.error(`   ${err.message}`);
     process.exit(1);
   } finally {
